@@ -183,7 +183,12 @@ Mari Carmen Hernandez Olivo	8	19	4	13	16	34	8	102	2.43</textarea>
     <p class="sub">Una imagen por sucursal, con los turnos a color y las notas del periodo.</p>
 
     <div class="card oro">
-      <label class="lab" for="fotoHR">Leer desde fotos</label>
+      <label class="lab" for="urlHoja">Traer directo de tu hoja</label>
+      <input id="urlHoja" type="text" placeholder="Liga publicada que termina en output=csv" value="https://docs.google.com/spreadsheets/d/e/2PACX-1vQY9Jo15YEBLKI5P7ZfgNKiDJNt-gRC-5rXeagYFpfqzR6Y6OwYD2UxRz1uXYYKaCQkAihJv6DIKoqM/pub?output=csv">
+      <button class="b b1" id="traerHoja" type="button" style="margin-top:10px;">Traer de la hoja</button>
+      <div class="ok" id="okHoja"></div>
+
+      <label class="lab" for="fotoHR" style="margin-top:20px;">O leer desde fotos</label>
       <input id="fotoHR" type="file" accept="image/*" multiple>
       <p class="hint">Puedes elegir las capturas de las tres sucursales de una vez. Se genera una imagen por cada una.</p>
       <div class="ok" id="okHR"></div>
@@ -221,7 +226,7 @@ Nota: Jueves | Naomi cocina PM
 Nota: Viernes | Alex cocina PM
 Nota: Sábado | Naomi cocina AM y Johan cocina PM
 Nota: Domingo | Johan y Carmen cocinan PM</textarea>
-        <p class="hint">Un colaborador por renglón: nombre, puesto y los siete turnos separados por barra. Usa <b>OFF</b> para descanso y <b>V</b> para vacaciones. Los códigos como <b>PCGS</b> cuentan jornada completa. Las notas van como <b>Nota: Día | texto</b>.</p>
+        <p class="hint">Pega directo de la hoja: selecciona el bloque de colaboradores con sus catorce columnas de entrada y salida, cópialo y pégalo aquí. También funciona el formato <b>nombre | puesto | turnos</b>. Usa <b>OFF</b> para descanso y <b>V</b> para vacaciones. Los códigos como <b>PCGS</b> cuentan jornada completa. Las notas van como <b>Nota: Día | texto</b>.</p>
       </div>
       <button class="b b1" id="genHR" type="button">Generar y revisar</button>
       <div class="err" id="errHR"></div>
@@ -656,28 +661,27 @@ function leerFoto(input, okId, instruccion, alLeer){
     if(!file) return;
     var ok=document.getElementById(okId);
     ok.style.display='block'; ok.style.color=LUZ; ok.textContent='Leyendo la imagen\u2026';
-    var fr=new FileReader();
-    fr.onload=function(){
-      var b64=String(fr.result).split(',')[1];
-      var tipo=file.type && file.type.indexOf('image/')===0 ? file.type : 'image/jpeg';
-      fetch('https://api.anthropic.com/v1/messages',{
+    comprimir(file).then(function(im){
+      return fetch('https://api.anthropic.com/v1/messages',{
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({model:'claude-sonnet-4-6', max_tokens:1500, messages:[{role:'user', content:[
-          {type:'image', source:{type:'base64', media_type:tipo, data:b64}},
+        body: JSON.stringify({model:'claude-sonnet-4-6', max_tokens:4000, messages:[{role:'user', content:[
+          {type:'image', source:{type:'base64', media_type:im.tipo, data:im.b64}},
           {type:'text', text:instruccion}
         ]}]})
-      }).then(function(r){ return r.json(); }).then(function(d){
-        var txt=(d.content||[]).filter(function(x){return x.type==='text';}).map(function(x){return x.text;}).join('');
-        txt=txt.replace(/```json|```/g,'').trim();
-        var o=JSON.parse(txt);
-        var n=alLeer(o);
-        ok.textContent='Listo: '+n+' colaboradores. Revisa los números y dale generar.';
-      }).catch(function(){
-        ok.style.color='#FFC9C4';
-        ok.textContent='No pude leer la imagen aquí. Esta función solo trabaja dentro de la app de Claude; si abriste la liga de GitHub, pega los datos a mano.';
-      });
-    };
-    fr.readAsDataURL(file);
+      }).then(function(r){ return r.json().then(function(d){ return {d:d, status:r.status}; }, function(){ throw new Error('[envío] la API no respondió en formato válido (código '+r.status+')'); }); }, function(er){ throw new Error('[envío] '+er.message); });
+    }).then(function(res){
+      var d=res.d;
+      if(!d || !d.content) throw new Error('[respuesta] '+detalleError(null, d) + ' (código '+res.status+')');
+      var txt=(d.content||[]).filter(function(x){return x.type==='text';}).map(function(x){return x.text;}).join('');
+      txt=txt.replace(/```json|```/g,'').trim();
+      var ini=txt.indexOf('{'), fin=txt.lastIndexOf('}');
+      if(ini<0||fin<0) throw new Error('[respuesta] no traía datos legibles');
+      var n=alLeer(JSON.parse(txt.slice(ini,fin+1)));
+      ok.textContent='Listo: '+n+' colaboradores. Revisa los números y dale generar.';
+    }).catch(function(e){
+      ok.style.color='#FFC9C4';
+      ok.textContent='No se pudo leer: '+detalleError(e, null)+'. Si abriste la liga de GitHub, esta función no está disponible ahí; pega los datos a mano.';
+    });
   });
 }
 
@@ -1001,34 +1005,84 @@ leerFoto(document.getElementById('fotoPR'),'okPR',
 var DIAS=['Lunes','Martes','Miércoles','Jueves','Viernes','Sábado','Domingo'];
 var sucHor='', perHor='', notas=[];
 
+function esHora(s){ return /^\d{1,2}:\d{2}$/.test(String(s).trim()); }
+function esCodigo(s){
+  var t=String(s).trim().toUpperCase();
+  return t==='OFF' || t==='V' || t==='D' || t==='0:00' || t==='' || /^[A-Z]{3,6}$/.test(t);
+}
 function parseHOR(txt){
   var out=[], malos=[]; notas=[];
   txt.split(/\r?\n/).forEach(function(ln){
-    var s=ln.trim(); if(!s) return;
+    var s=ln.replace(/\s+$/,'');
+    if(!s.trim()) return;
     if(/^nota\s*:/i.test(s)){
       var q=s.replace(/^nota\s*:/i,'').split('|');
       notas.push({dia:(q[0]||'').trim(), texto:(q[1]||'').trim()});
       return;
     }
-    var p=s.split('|').map(function(x){ return x.trim(); });
-    if(p.length<3){ malos.push(s); return; }
-    var nombre=p[0], rol=p[1], t=p.slice(2,9);
-    while(t.length<7) t.push('D');
-    out.push({nombre:nombre, rol:rol, turnos:t});
+    if(/^(nombre de la empresa|per[ií]odo|periodo|semana|framework|total|columna|lunes)/i.test(s.trim())) return;
+
+    /* formato propio: nombre | rol | 7 turnos */
+    if(s.indexOf('|')>-1){
+      var p=s.split('|').map(function(x){ return x.trim(); });
+      if(p.length<3){ malos.push(s.trim()); return; }
+      var t=p.slice(2,9);
+      while(t.length<7) t.push('OFF');
+      out.push({nombre:p[0], rol:p[1], turnos:t});
+      return;
+    }
+
+    /* pegado directo de la hoja de cálculo */
+    var c=s.split(/\t|\s{2,}/).map(function(x){ return x.trim(); }).filter(function(x){ return x!==''; });
+    if(!c.length) return;
+    var nombre='', rol='', celdas=[];
+    c.forEach(function(campo){
+      var f=campo.trim();
+      if(!nombre){
+        var m=f.match(/^(\d+\s*)?(SM|SS|MF|COC|POSTR)$/i);
+        if(m){ rol=m[2].toUpperCase(); return; }
+        if(/^\d+(\.\d+)?\s*(hrs?|horas?)$/i.test(f)) return;
+        if(esHora(f)) { celdas.push(f); return; }
+        if(/[a-záéíóúñ]{3,}/i.test(f)){
+          var m2=f.match(/^(\d+\s*)?(SM|SS|MF|COC|POSTR)\s+(.+)$/i);
+          if(m2){ rol=m2[2].toUpperCase(); nombre=m2[3].trim(); }
+          else nombre=f;
+          return;
+        }
+        return;
+      }
+      if(/^\d+(\.\d+)?\s*(hrs?|horas?)$/i.test(f)) return;
+      if(esHora(f) || esCodigo(f)) celdas.push(f);
+    });
+    if(!nombre){
+      if(c.length===1){ notas.push({dia:'', texto:c[0]}); }
+      return;
+    }
+    if(celdas.length < 2){ malos.push(s.trim()); return; }
+    var turnos=[];
+    for(var i=0;i<celdas.length && turnos.length<7;i+=2){
+      var a=celdas[i], b=celdas[i+1];
+      if(esHora(a) && esHora(b)) turnos.push(a+'-'+b);
+      else if(esHora(a) && !esHora(b)) turnos.push(a+'-'+a);
+      else turnos.push(String(a).toUpperCase());
+    }
+    while(turnos.length<7) turnos.push('OFF');
+    out.push({nombre:nombre, rol:rol, turnos:turnos});
   });
   return {filas:out, malos:malos};
 }
-
 function tipoTurno(v){
   var s=String(v||'').trim();
   if(/^(v|vac|vacaciones)$/i.test(s)) return {t:'vac'};
   if(!s || /^(off|d|desc|descanso|0:00|0)$/i.test(s)) return {t:'desc'};
   if(/[a-z]/i.test(s) && s.indexOf(':')===-1) return {t:'cod', txt:s.toUpperCase()};
   var pr=s.split(/[-–a]/).map(function(x){ return x.trim(); }).filter(function(x){ return x; });
-  var ent=pr[0]||'', sal=pr[1]||'';
+  var ent=pr[0]||'', sal=pr[1]||'', inv=false;
   var hh=parseInt(ent.split(':')[0],10);
   if(!isFinite(hh)) return {t:'cod', txt:s.toUpperCase()};
-  return {t: hh<12 ? 'am':'pm', ent:ent, sal:sal};
+  function mm(q){ var z=String(q).split(':'); var a=parseInt(z[0],10), b=parseInt(z[1]||'0',10); return (isFinite(a)?a:0)*60+(isFinite(b)?b:0); }
+  if(sal && mm(sal) < mm(ent)){ var tmp=ent; ent=sal; sal=tmp; inv=true; hh=parseInt(ent.split(':')[0],10); }
+  return {t: hh<12 ? 'am':'pm', ent:ent, sal:sal, inv:inv};
 }
 
 function minutos(hhmm){
@@ -1039,9 +1093,7 @@ function minutos(hhmm){
 function duracion(v){
   var t=tipoTurno(v);
   if(t.t!=='am' && t.t!=='pm') return null;
-  var d=minutos(t.sal)-minutos(t.ent);
-  if(d<0) d+=1440;
-  return d/60;
+  return Math.abs(minutos(t.sal)-minutos(t.ent))/60;
 }
 function excepcionDe(nombre){
   var ex=document.getElementById('excep').value||'', res=null;
@@ -1065,22 +1117,57 @@ function diaCuenta(v){
   return t==='am' || t==='pm' || t==='cod';
 }
 function horasSemana(r){
-  var j=jornadaDe(r.nombre), s=0;
+  var j=jornadaDe(r.nombre), n=0;
   r.turnos.forEach(function(v){
-    var t=tipoTurno(v);
-    if(t.t==='cod'){ s+=j; return; }
-    if(t.t!=='am' && t.t!=='pm') return;
-    var m=minutos(t.sal)-minutos(t.ent);
-    if(m<0) m+=1440;
-    s+=m/60;
+    var t=tipoTurno(v).t;
+    if(t==='am' || t==='pm' || t==='cod') n++;
   });
-  return Math.round(s*100)/100;
+  return Math.round(n*j*100)/100;
 }
 function esperadas(nombre){
   var e=excepcionDe(nombre);
   if(e && isFinite(e.meta)) return e.meta;
   if(e && isFinite(e.jor)) return e.jor*6;
   return parseFloat(document.getElementById('horasSem').value)||42;
+}
+
+
+function comprimir(file){
+  return new Promise(function(res, rej){
+    var fr=new FileReader();
+    fr.onerror=function(){ rej(new Error('[abrir archivo] el navegador no pudo leer el archivo')); };
+    fr.onload=function(){
+      var du=String(fr.result);
+      var coma=du.indexOf(',');
+      if(coma<0){ rej(new Error('[abrir archivo] archivo vacío o dañado')); return; }
+      var b64=du.slice(coma+1);
+      var tipo=(du.slice(5, du.indexOf(';'))||'').toLowerCase();
+      if(['image/jpeg','image/png','image/gif','image/webp'].indexOf(tipo)===-1) tipo='image/jpeg';
+      if(b64.length < 4200000){ res({b64:b64, tipo:tipo}); return; }
+      var img=new Image();
+      img.onload=function(){
+        try{
+          var max=1400, w=img.naturalWidth||img.width, hh=img.naturalHeight||img.height;
+          var e2=Math.min(1, max/Math.max(w,hh));
+          var c=document.createElement('canvas');
+          c.width=Math.max(1,Math.round(w*e2)); c.height=Math.max(1,Math.round(hh*e2));
+          var x=c.getContext('2d');
+          x.fillStyle='#FFFFFF'; x.fillRect(0,0,c.width,c.height);
+          x.drawImage(img,0,0,c.width,c.height);
+          var d2=c.toDataURL('image/jpeg',0.82);
+          res({b64:d2.slice(d2.indexOf(',')+1), tipo:'image/jpeg'});
+        }catch(e){ res({b64:b64, tipo:tipo}); }
+      };
+      img.onerror=function(){ res({b64:b64, tipo:tipo}); };
+      img.src=du;
+    };
+    fr.readAsDataURL(file);
+  });
+}
+function detalleError(e, d){
+  if(d && d.error && d.error.message) return 'La API respondió: '+d.error.message;
+  if(d && d.type==='error' && d.message) return 'La API respondió: '+d.message;
+  return (e && e.message) ? e.message : 'error desconocido';
 }
 
 function norm(s){ return String(s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,''); }
@@ -1149,6 +1236,9 @@ function revisar(f){
       if(t.t==='desc'){ off++; return; }
       if(t.t==='vac') return;
       dias++;
+      if(t.inv){
+        hall.push({n:1, txt:r.nombre+' · '+DIAS[k]+': el turno viene invertido en la captura, se leyó como '+t.ent+' a '+t.sal});
+      }
       var d=duracion(v);
       if(d!==null && Math.abs(d-j)>0.01){
         hall.push({n:2, txt:r.nombre+' · '+DIAS[k]+': '+v+' dura '+(Math.round(d*100)/100)+' h y su jornada es de '+j+' h'});
@@ -1277,6 +1367,7 @@ function svgHOR(f){
         S+=T(x+cw/2,cy+42,esc(t.txt),{a:'middle',s:20,w:600,f:col});
       } else {
         S+=icono(t.t==='am'?'sol':'luna', x+12, cy+22, 17, col);
+        if(t.inv) S+='<circle cx="'+(x+cw-12)+'" cy="'+(cy+12)+'" r="5" fill="#C0392B"/>';
         S+=T(x+cw/2+8,cy+34,esc(t.ent),{a:'middle',s:23,w:600,f:TXT});
         S+=T(x+cw/2+8,cy+56,esc(t.sal),{a:'middle',s:20,w:500,f:col});
       }
@@ -1347,6 +1438,15 @@ document.getElementById('genHR').addEventListener('click', function(){
   var sIn=document.getElementById('semHRin').value.trim();
   sem = sIn ? sIn : (d0 ? String(semanaDe(d0)) : sem);
   anio = d0 ? d0.slice(0,4) : anio;
+  var crudo=document.getElementById('datosHR').value;
+  if(/SUC:/i.test(crudo) && crudo.indexOf(',')>-1){
+    var bl=hojasDeCSV(crudo);
+    if(bl.length){
+      HOJAS=bl.map(function(o){ return {sucursal:o.sucursal, periodo:o.periodo, semana:o.semana, inicio:o.inicio, filas:o.filas, notas:o.notas}; });
+      hojaAct=-1; cargarHoja(0);
+      say('Leí '+HOJAS.length+' sucursal(es) del texto pegado');
+    }
+  }
   var r=parseHOR(document.getElementById('datosHR').value);
   if(!r.filas.length){ err.textContent='No pude leer ningún colaborador. Revisa que cada renglón tenga nombre, puesto y turnos separados por barra.'; err.style.display='block'; return; }
   if(r.malos.length){ err.innerHTML='Omití '+r.malos.length+' renglón(es): <b>'+esc(r.malos.join(' · '))+'</b>'; err.style.display='block'; }
@@ -1397,26 +1497,26 @@ function cargarHoja(i){
   pintarHojas();
 }
 function leerUna(file){
-  return new Promise(function(res, rej){
-    var fr=new FileReader();
-    fr.onload=function(){
-      var b64=String(fr.result).split(',')[1];
-      var tipo=file.type && file.type.indexOf('image/')===0 ? file.type : 'image/jpeg';
-      fetch('https://api.anthropic.com/v1/messages',{
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({model:'claude-sonnet-4-6', max_tokens:2000, messages:[{role:'user', content:[
-          {type:'image', source:{type:'base64', media_type:tipo, data:b64}},
-          {type:'text', text:INSTR_HR}
-        ]}]})
-      }).then(function(r){ return r.json(); }).then(function(d){
+  return comprimir(file).then(function(im){
+    return fetch('https://api.anthropic.com/v1/messages',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({model:'claude-sonnet-4-6', max_tokens:4000, messages:[{role:'user', content:[
+        {type:'image', source:{type:'base64', media_type:im.tipo, data:im.b64}},
+        {type:'text', text:INSTR_HR}
+      ]}]})
+    }).then(function(r){ return r.json().then(function(d){ return {d:d, status:r.status}; }, function(){ throw new Error('[envío] la API no respondió en formato válido (código '+r.status+')'); }); }, function(er){ throw new Error('[envío] '+er.message); })
+      .then(function(res){
+        var d=res.d;
+        if(!d || !d.content) throw new Error('[respuesta] '+detalleError(null, d) + ' (código '+res.status+')');
         var txt=(d.content||[]).filter(function(x){return x.type==='text';}).map(function(x){return x.text;}).join('');
-        res(JSON.parse(txt.replace(/```json|```/g,'').trim()));
-      }).catch(rej);
-    };
-    fr.onerror=rej;
-    fr.readAsDataURL(file);
+        txt=txt.replace(/```json|```/g,'').trim();
+        var ini=txt.indexOf('{'), fin=txt.lastIndexOf('}');
+        if(ini<0||fin<0) throw new Error('[respuesta] no traía datos legibles');
+        return JSON.parse(txt.slice(ini,fin+1));
+      });
   });
 }
+
 document.getElementById('fotoHR').addEventListener('change', function(ev){
   var files=Array.prototype.slice.call(ev.target.files||[]);
   if(!files.length) return;
@@ -1434,9 +1534,9 @@ document.getElementById('fotoHR').addEventListener('change', function(ev){
     leerUna(files[i]).then(function(o){
       if(o && o.filas && o.filas.length) HOJAS.push(o);
       i++; paso();
-    }).catch(function(){
+    }).catch(function(e){
       ok.style.color='#FFC9C4';
-      ok.textContent='No pude leer la imagen aquí. Esta función solo trabaja dentro de la app de Claude; si abriste la liga de GitHub, captura los turnos a mano.';
+      ok.textContent='No se pudo leer la imagen '+(i+1)+': '+detalleError(e, null)+'. Si abriste la liga de GitHub, esta función no está disponible ahí; captura los turnos a mano.';
     });
   }
   paso();
@@ -1450,6 +1550,131 @@ document.getElementById('todasHR').addEventListener('click', function(){
     setTimeout(function(){ descargarPNG(function(){}); i++; setTimeout(paso, 1200); }, 900);
   }
   paso();
+});
+
+
+/* ---------- lectura directa de la hoja publicada ---------- */
+function csvFilas(txt){
+  var filas=[], f=[], v='', q=false, i=0;
+  while(i<txt.length){
+    var c=txt[i];
+    if(q){
+      if(c==='"'){ if(txt[i+1]==='"'){ v+='"'; i++; } else q=false; }
+      else v+=c;
+    } else {
+      if(c==='"') q=true;
+      else if(c===','){ f.push(v); v=''; }
+      else if(c==='\n'){ f.push(v); filas.push(f); f=[]; v=''; }
+      else if(c!=='\r') v+=c;
+    }
+    i++;
+  }
+  if(v!=='' || f.length){ f.push(v); filas.push(f); }
+  return filas.map(function(r){ return r.map(function(x){ return String(x).trim(); }); });
+}
+function buscaEn(fila, re){
+  for(var i=0;i<fila.length;i++) if(re.test(fila[i])) return i;
+  return -1;
+}
+function isoDe(d){
+  var m=String(d).match(/(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})/);
+  if(!m) return '';
+  return m[3]+'-'+('0'+m[2]).slice(-2)+'-'+('0'+m[1]).slice(-2);
+}
+function hojasDeCSV(txt){
+  var filas=csvFilas(txt), bloques=[], act=null;
+  filas.forEach(function(r){
+    var iSuc=buscaEn(r, /^SUC:?$/i);
+    if(iSuc>-1){
+      var nom='';
+      for(var k=iSuc+1;k<r.length;k++) if(r[k]){ nom=r[k]; break; }
+      act={sucursal:nom, periodo:'', semana:null, inicio:'', filas:[], notas:[], mapa:null, etapa:0};
+      bloques.push(act);
+      return;
+    }
+    if(!act) return;
+    if(buscaEn(r, /^PER[IÍ][OÓ]DO:?$/i)>-1){
+      var ip=buscaEn(r, /^PER[IÍ][OÓ]DO:?$/i);
+      for(var k=ip+1;k<r.length;k++){ if(r[k] && !/^\d{1,2}[-\/]\d{1,2}[-\/]\d{4}$/.test(r[k])){ act.periodo=r[k]; break; } }
+      for(var k=0;k<r.length;k++){ var iso=isoDe(r[k]); if(iso){ act.inicio=iso; break; } }
+      return;
+    }
+    if(buscaEn(r, /^SEMANA:?$/i)>-1){
+      var is=buscaEn(r, /^SEMANA:?$/i);
+      for(var k=is+1;k<r.length;k++){ if(/^\d+$/.test(r[k])){ act.semana=parseInt(r[k],10); break; } }
+      var iL=buscaEn(r, /^lunes$/i);
+      if(iL>-1){
+        act.mapa=[];
+        var dd=['lunes','martes','mi[eé]rcoles','jueves','viernes','s[aá]bado','domingo'];
+        dd.forEach(function(d,idx){
+          var ii=buscaEn(r, new RegExp('^'+d+'$','i'));
+          if(ii>-1) act.mapa.push({i:ii, dia:DIAS[idx]});
+        });
+      }
+      return;
+    }
+    if(buscaEn(r, /^framework$/i)>-1){ act.etapa=1; return; }
+    if(act.etapa!==1) return;
+
+    var rol='', nombre='';
+    for(var k=0;k<r.length;k++){
+      var m=r[k].match(/^(\d+\s*)?(SM|SS|MF|COC|POSTR)$/i);
+      if(m){ rol=m[2].toUpperCase(); if(r[k+1]) nombre=r[k+1]; break; }
+    }
+    if(rol && nombre){
+      var celdas=[];
+      for(var k=6;k<r.length;k++){
+        var c2=r[k];
+        if(!c2) continue;
+        if(/^\d+(\.\d+)?\s*(hrs?|horas?)$/i.test(c2)) continue;
+        celdas.push(c2);
+      }
+      var turnos=[];
+      for(var k=0;k<celdas.length && turnos.length<7;k+=2){
+        var a=celdas[k], b=celdas[k+1];
+        if(/^\d{1,2}:\d{2}$/.test(a) && /^\d{1,2}:\d{2}$/.test(b)) turnos.push(a+'-'+b);
+        else turnos.push(String(a).toUpperCase());
+      }
+      while(turnos.length<7) turnos.push('OFF');
+      act.filas.push({nombre:nombre, rol:rol, turnos:turnos});
+      return;
+    }
+    if(act.mapa && act.filas.length){
+      for(var k=0;k<r.length;k++){
+        var c3=r[k];
+        if(!c3 || !/[a-zá-ú]{4,}/i.test(c3)) continue;
+        var dia='';
+        act.mapa.forEach(function(m2){ if(k>=m2.i) dia=m2.dia; });
+        if(dia) act.notas.push({dia:dia, texto:c3.charAt(0)+c3.slice(1).toLowerCase()});
+      }
+    }
+  });
+  return bloques.filter(function(b2){ return b2.filas.length; });
+}
+document.getElementById('traerHoja').addEventListener('click', function(){
+  var u=document.getElementById('urlHoja').value.trim();
+  var ok=document.getElementById('okHoja');
+  ok.style.display='block'; ok.style.color=LUZ; ok.textContent='Descargando la hoja\u2026';
+  if(u.indexOf('output=csv')===-1){
+    ok.style.color='#FFC9C4';
+    ok.textContent='Esa liga no es la publicada en CSV. En tu hoja: Archivo, Compartir, Publicar en la Web, formato .csv.';
+    return;
+  }
+  fetch(u + (u.indexOf('?')>-1?'&':'?') + 'v=' + Date.now())
+   .then(function(r){ if(!r.ok) throw new Error('código '+r.status); return r.text(); })
+   .then(function(txt){
+     var b2=hojasDeCSV(txt);
+     if(!b2.length) throw new Error('no encontré bloques de sucursal en la hoja');
+     HOJAS=b2.map(function(o){ return {sucursal:o.sucursal, periodo:o.periodo, semana:o.semana, inicio:o.inicio, filas:o.filas, notas:o.notas}; });
+     hojaAct=-1;
+     ok.textContent='Listo: '+HOJAS.length+' sucursal(es) · '+HOJAS.map(function(x){ return x.sucursal; }).join(', ');
+     cargarHoja(0);
+     document.getElementById('genHR').click();
+   })
+   .catch(function(e){
+     ok.style.color='#FFC9C4';
+     ok.textContent='No se pudo traer la hoja: '+(e.message||'error')+'. Verifica que esté publicada como CSV.';
+   });
 });
 
 </script>
